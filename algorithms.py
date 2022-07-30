@@ -15,7 +15,13 @@ from scipy.signal import savgol_filter, lfilter
 from model.model import LSTMModel
 import torch
 import math
+camera = None
+state = "loading"
 
+def get_camera():
+    return camera
+def get_state():
+    return state
 
 def get_source(args):
     tagged_df = None
@@ -248,7 +254,7 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
         f, ax = plt.subplots()
         move_figure(f, 800, 100)
     window_names = [args.video if isinstance(args.video, str) else 'Cam '+str(args.video) for args in argss]
-    [cv2.namedWindow(window_name) for window_name in window_names]
+    # [cv2.namedWindow(window_name) for window_name in window_names]
     while True:
 
         # if not queue1.empty() and not queue2.empty():
@@ -260,9 +266,9 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                     event.set()
                 break
 
-            if cv2.waitKey(1) == 27 or any(cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1 for window_name in window_names):
-                if not event.is_set():
-                    event.set()
+            # if cv2.waitKey(1) == 27 or any(cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1 for window_name in window_names):
+            #     if not event.is_set():
+            #         event.set()
 
             kp_frames = [dict_frame["keypoint_sets"] for dict_frame in dict_frames]
             if argss[0].num_cams == 1:
@@ -271,7 +277,11 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                 dict_frames[0]["tagged_df"]["text"] += f" Pred: {activity_dict[prediction+5]}"
                 img, output_videos[0] = show_tracked_img(dict_frames[0], ip_sets[0], num_matched, output_videos[0], argss[0])
                 # print(img1.shape)
-                cv2.imshow(window_names[0], img)
+                # cv2.imshow(window_names[0], img)
+                global camera
+                global state
+                camera = img
+                state = activity_dict[prediction+5]
 
             elif argss[0].num_cams == 2:
                 num_matched, new_num, indxs_unmatched1 = match_ip(ip_sets[0], kp_frames[0], lstm_sets[0], num_matched, max_length_mat)
@@ -354,44 +364,7 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                 assert(len(lstm_sets[0]) == len(ip_sets[0]))
                 assert(len(lstm_sets[1]) == len(ip_sets[1]))
 
-            DEBUG = False
-            # for ip_set, feature_plotter in zip(ip_sets, feature_plotters):
-            #     for cnt in range(len(FEATURE_LIST)):
-            #         plt_f = FEATURE_LIST[cnt]
-            #         if ip_set and ip_set[0] is not None and ip_set[0][-1] is not None and plt_f in ip_set[0][-1]["features"]:
-            #             # print(ip_set[0][-1]["features"])
-            #             feature_plotter[cnt].append(ip_set[0][-1]["features"][plt_f])
-            #
-            #         else:
-            #             # print("None")
-            #             feature_plotter[cnt].append(0)
-            # DEBUG = True
 
-    cv2.destroyAllWindows()
-    # for feature_plotter in feature_plotters:
-    #     for i, feature_arr in enumerate(feature_plotter):
-    #         plt.clf()
-    #         x = np.linspace(1, len(feature_arr), len(feature_arr))
-    #         axes = plt.gca()
-    #         filter_array = feature_arr
-    #         line, = axes.plot(x, filter_array, 'r-')
-    #         plt.ylabel(FEATURE_LIST[i])
-    #         # #plt.savefig(f'{args1.video}_{FEATURE_LIST[i]}_filter.png')
-    #         plt.pause(1e-7)
-
-    # for i, feature_arr in enumerate(feature_plotter2):
-    #     plt.clf()
-    #     x = np.linspace(1, len(feature_arr), len(feature_arr))
-    #     axes = plt.gca()
-    #     filter_array = feature_arr
-    #     line, = axes.plot(x, filter_array, 'r-')
-    #     plt.ylabel(FEATURE_LIST[i])
-    #     # plt.savefig(f'{args2.video}_{FEATURE_LIST[i]}_filter.png')
-    #     plt.pause(1e-7)
-    #     # if len(re_matrix1[0]) > 0:
-    #     #     print(np.linalg.norm(ip_sets[0][0][-1][0]['B']-ip_sets[0][0][-1][0]['H']))
-
-    # print("P2 Over")
     del model
     return
 

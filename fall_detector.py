@@ -6,10 +6,13 @@ import logging
 import torch.multiprocessing as mp
 import csv
 from default_params import *
-from algorithms import *
 from helpers import last_ip
 import os
 import matplotlib.pyplot as plt
+import cv2
+import time
+import receiver
+import algorithms
 
 try:
     mp.set_start_method('spawn')
@@ -92,58 +95,53 @@ class FallDetector:
         counter1 = mp.Value('i', 0)
         counter2 = mp.Value('i', 0)
         argss = [copy.deepcopy(self.args) for _ in range(self.args.num_cams)]
-        if self.args.num_cams == 1:
-            if self.args.video is None:
-                argss[0].video = 0
-            process1 = mp.Process(target=extract_keypoints_parallel,
-                                  args=(queues[0], argss[0], counter1, counter2, self.consecutive_frames, e))
-            process1.start()
-            if self.args.coco_points:
-                process1.join()
-            else:
-                process2 = mp.Process(target=alg2_sequential, args=(queues, argss,
-                                                                    self.consecutive_frames, e))
-                process2.start()
-            process1.join()
-        elif self.args.num_cams == 2:
-            if self.args.video is None:
-                argss[0].video = 0
-                argss[1].video = 1
-            else:
-                try:
-                    vid_name = self.args.video.split('.')
-                    argss[0].video = ''.join(vid_name[:-1])+'1.'+vid_name[-1]
-                    argss[1].video = ''.join(vid_name[:-1])+'2.'+vid_name[-1]
-                    print('Video 1:', argss[0].video)
-                    print('Video 2:', argss[1].video)
-                except Exception as exep:
-                    print('Error: argument --video not properly set')
-                    print('For 2 video fall detection(--num_cams=2), save your videos as abc1.xyz & abc2.xyz and set --video=abc.xyz')
-                    return
-            process1_1 = mp.Process(target=extract_keypoints_parallel,
-                                    args=(queues[0], argss[0], counter1, counter2, self.consecutive_frames, e))
-            process1_2 = mp.Process(target=extract_keypoints_parallel,
-                                    args=(queues[1], argss[1], counter2, counter1, self.consecutive_frames, e))
-            process1_1.start()
-            process1_2.start()
-            if self.args.coco_points:
-                process1_1.join()
-                process1_2.join()
-            else:
-                process2 = mp.Process(target=alg2_sequential, args=(queues, argss,
-                                                                    self.consecutive_frames, e))
-                process2.start()
-            process1_1.join()
-            process1_2.join()
-        else:
-            print('More than 2 cameras are currently not supported')
-            return
 
+        # 改成仅有一个摄像头
+        if self.args.video is None:
+            argss[0].video = 0
+        process1 = mp.Process(target=algorithms.extract_keypoints_parallel,
+                                args=(queues[0], argss[0], counter1, counter2, self.consecutive_frames, e))
+        process1.start()
+        if self.args.coco_points:
+            process1.join()
+        else:
+            process2 = mp.Process(target=algorithms.alg2_sequential, args=(queues, argss,
+                                                                self.consecutive_frames, e))
+            process2.start()
+
+        recvr = receiver.Receiver(draw='amp', subcarrier=20)
+        process3 = mp.Process(target=recvr.serial_read)
+        process3.start()
+        process4 = mp.Process(target=recvr.draw)
+        process4.start()
+        
+        process5 = mp.Process(target=self.window)
+        process5.start()
+
+        process1.join()
         if not self.args.coco_points:
             process2.join()
+        process3.join()
+        process4.join()
+        process5.join()
+
         print('Exiting...')
         return
 
+    def window(self):
+        cv2.namedWindow('preview')
+        while True:
+            time.sleep(0.1)
+            camera = algorithms.camera
+            if camera is None:
+                continue
+            # print(algorithms.state)
+            # preview = np.concatenate((camera, receiver.image_csi))
+            preview = camera
+            cv2.imshow('preview', preview)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     f = FallDetector()
