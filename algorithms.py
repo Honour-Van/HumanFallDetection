@@ -2,6 +2,7 @@ import cv2
 import logging
 import base64
 import time
+from matplotlib import image
 import numpy as np
 import matplotlib.pyplot as plt
 from vis.visual import write_on_image, visualise, activity_dict, visualise_tracking
@@ -15,9 +16,140 @@ from scipy.signal import savgol_filter, lfilter
 from model.model import LSTMModel
 import torch
 import math
+from math import sqrt, atan2
+import queue
+import serial
 
-camera = None
-state = "loading"
+class Receiver:
+    def __init__(self, draw='amp', subcarrier=20):
+        # total received data
+        self.tot_recv = []
+        self.t = np.zeros(0)
+        self.y = np.zeros(0)
+        self.draw_mode = 'amp'
+        self.subcarrier = subcarrier
+        self.port_path='/dev/ttyUSB0'
+        self.baudrate=115200
+        self.timeout=0.5
+        self.data_path='./data.txt'
+        self.lock=torch.multiprocessing.Lock()
+        self.granularity = 10
+        self.queue_len = 30
+        self.window_size = 20
+
+
+    def get_csi(self, recv_buf: str):
+        """
+        get_csi:
+        handle received data in real time analysis
+        @Return:
+        a float timestamp, a list of amplitude, a list of phase of the current received data
+        @Restriction:
+        The data should be in the form of "timestamp,[CSI_DATA]"
+        """
+
+        # get raw csi data
+        st = recv_buf.index('[')
+        ed = recv_buf.index(']')
+        raw_csi = recv_buf[st+1:ed-1]
+        raw_csi=list(map(int,raw_csi.split())) # str list to int list
+
+        real = raw_csi[::2]  # real part
+        img = raw_csi[1::2]  # imaginary part
+        length = len(real)
+        amp = [sqrt(real[k]**2+img[k]**2) for k in range(length)]
+        phs = [atan2(img[k], real[k]) for k in range(length)]
+
+        # get time stamp
+        timestamp = float(recv_buf.split(',')[0])
+        assert type(timestamp)==float, "timestamp must be float"
+        return timestamp, amp, phs
+
+    def segment(self):
+        check_queue = self.t[self.queue_len//2*self.granularity:]
+        if check_queue.shape[0] < self.granularity:
+            return None
+        # check_queue = savgol_filter(check_queue, self.granularity, 2)
+        var = np.std(check_queue) ** 2
+        return var
+
+    def serial_read(self, img_list):
+        data_file=open(self.data_path,'w+')
+        buf = queue.SimpleQueue()
+        fig = plt.figure()
+        with serial.Serial(self.port_path,baudrate=self.baudrate,timeout=self.timeout) as ser:
+            while True:
+                try:
+                    last_timestamp = None
+                    skip_count = 0
+                    print('start reading')
+
+                    while ser.readable():
+                        ch = ser.read()
+                        if ch == b'\r':
+                            continue
+
+                        buf.put(ch)
+                        if ch == b'\n':
+                            cur_line = []
+                            while not buf.empty():
+                                cur_line.append(buf.get())
+                            cur_line = b''.join(cur_line)
+                            cur_data=cur_line.decode(errors='ignore').strip(b'\x00'.decode()).strip('\r')
+                            data_file.writelines(cur_data)
+                            if ('[' in cur_data) and (']' in cur_data):
+                                timestamp, amp, phs = self.get_csi(cur_data)
+                                if last_timestamp and (timestamp - last_timestamp > 2 or timestamp < last_timestamp) and skip_count < 3:
+                                    skip_count += 1
+                                    print("skip once:", timestamp)
+                                #     continue
+                                    timestamp = float(str(timestamp)[1:])
+                                else:
+                                    skip_count = 0
+                                    last_timestamp = timestamp
+                                self.lock.acquire()
+                                self.t = np.append(self.t, timestamp)
+                                self.y = np.append(self.y, amp[self.subcarrier] if self.draw_mode == 'amp' else phs[self.subcarrier])
+                                
+                                if self.t.shape[0] // self.granularity > self.queue_len:
+                                    self.t = self.t[self.granularity:]
+                                    self.y = self.y[self.granularity:]
+
+                                    # self.y[:self.granularity] = savgol_filter(self.y[:self.granularity], self.granularity, 3)
+                                seg_vals = self.segment()
+                                # print(seg_vals)
+                                
+                                # print(self.t.shape[0])
+                                self.lock.release()
+
+                                plt.rcParams["figure.figsize"] = [7.50, 3.50]
+                                plt.rcParams["figure.autolayout"] = True
+                                self.lock.acquire()
+                                
+                                fig.canvas.draw()
+                                plt.plot(self.t, self.y, lw=1, color='#68A9F7')
+                                self.lock.release()
+
+                                if self.t.size==0:
+                                    return
+                                time_pointer=self.t[-1] 
+                                if time_pointer > self.window_size:
+                                    plt.xlim(left=time_pointer-self.window_size, right=time_pointer)
+                                # convert canvas to image
+                                img = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8,
+                                        sep='')
+                                img  = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                                img = cv2.cvtColor(img,cv2.COLOR_RGB2BGR)
+                                img_list[0] = img
+                                # print(image_csi.shape)
+
+
+                except KeyboardInterrupt:
+                    break
+                except:
+                    continue
+
+
 
 def get_source(args):
     tagged_df = None
@@ -232,8 +364,21 @@ def match_unmatched(unmatched_1, unmatched_2, lstm_set1, lstm_set2, num_matched)
 
     return final_pairs, new_matched_1, new_matched_2, new_lstm1, new_lstm2
 
+def vconcat_resize(img_list, interpolation 
+                   = cv2.INTER_CUBIC):
+      # take minimum width
+    w_min = min(img.shape[1] 
+                for img in img_list)
+      
+    # resizing images
+    im_list_resize = [cv2.resize(img,
+                      (w_min, int(img.shape[0] * w_min / img.shape[1])),
+                                 interpolation = interpolation)
+                      for img in img_list]
+    # return final image
+    return cv2.vconcat(im_list_resize)
 
-def alg2_sequential(queues, argss, consecutive_frames, event):
+def alg2_sequential(queues, argss, consecutive_frames, event, img_list):
     model = LSTMModel(h_RNN=48, h_RNN_layers=2, drop_p=0.1, num_classes=7)
     model.load_state_dict(torch.load('model/lstm_weights.sav',map_location=argss[0].device))
     model.eval()
@@ -250,7 +395,7 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
         f, ax = plt.subplots()
         move_figure(f, 800, 100)
     window_names = [args.video if isinstance(args.video, str) else 'Cam '+str(args.video) for args in argss]
-    # [cv2.namedWindow(window_name) for window_name in window_names]
+    [cv2.namedWindow(window_name) for window_name in window_names]
     while True:
 
         # if not queue1.empty() and not queue2.empty():
@@ -262,9 +407,9 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                     event.set()
                 break
 
-            # if cv2.waitKey(1) == 27 or any(cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1 for window_name in window_names):
-            #     if not event.is_set():
-            #         event.set()
+            if cv2.waitKey(1) == 27 or any(cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1 for window_name in window_names):
+                if not event.is_set():
+                    event.set()
 
             kp_frames = [dict_frame["keypoint_sets"] for dict_frame in dict_frames]
             if argss[0].num_cams == 1:
@@ -273,12 +418,10 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                 dict_frames[0]["tagged_df"]["text"] += f" Pred: {activity_dict[prediction+5]}"
                 img, output_videos[0] = show_tracked_img(dict_frames[0], ip_sets[0], num_matched, output_videos[0], argss[0])
                 # print(img1.shape)
-                # cv2.imshow(window_names[0], img)
-                global camera
-                global state
-                camera = img
-                state = activity_dict[prediction+5]
-                print('camera changed')
+                if img_list[0] is not None:
+                    img =  vconcat_resize((img, img_list[0]))
+                    # img = img_list[0]
+                cv2.imshow(window_names[0], img)
 
             elif argss[0].num_cams == 2:
                 num_matched, new_num, indxs_unmatched1 = match_ip(ip_sets[0], kp_frames[0], lstm_sets[0], num_matched, max_length_mat)
@@ -361,7 +504,44 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                 assert(len(lstm_sets[0]) == len(ip_sets[0]))
                 assert(len(lstm_sets[1]) == len(ip_sets[1]))
 
+            DEBUG = False
+            # for ip_set, feature_plotter in zip(ip_sets, feature_plotters):
+            #     for cnt in range(len(FEATURE_LIST)):
+            #         plt_f = FEATURE_LIST[cnt]
+            #         if ip_set and ip_set[0] is not None and ip_set[0][-1] is not None and plt_f in ip_set[0][-1]["features"]:
+            #             # print(ip_set[0][-1]["features"])
+            #             feature_plotter[cnt].append(ip_set[0][-1]["features"][plt_f])
+            #
+            #         else:
+            #             # print("None")
+            #             feature_plotter[cnt].append(0)
+            # DEBUG = True
 
+    cv2.destroyAllWindows()
+    # for feature_plotter in feature_plotters:
+    #     for i, feature_arr in enumerate(feature_plotter):
+    #         plt.clf()
+    #         x = np.linspace(1, len(feature_arr), len(feature_arr))
+    #         axes = plt.gca()
+    #         filter_array = feature_arr
+    #         line, = axes.plot(x, filter_array, 'r-')
+    #         plt.ylabel(FEATURE_LIST[i])
+    #         # #plt.savefig(f'{args1.video}_{FEATURE_LIST[i]}_filter.png')
+    #         plt.pause(1e-7)
+
+    # for i, feature_arr in enumerate(feature_plotter2):
+    #     plt.clf()
+    #     x = np.linspace(1, len(feature_arr), len(feature_arr))
+    #     axes = plt.gca()
+    #     filter_array = feature_arr
+    #     line, = axes.plot(x, filter_array, 'r-')
+    #     plt.ylabel(FEATURE_LIST[i])
+    #     # plt.savefig(f'{args2.video}_{FEATURE_LIST[i]}_filter.png')
+    #     plt.pause(1e-7)
+    #     # if len(re_matrix1[0]) > 0:
+    #     #     print(np.linalg.norm(ip_sets[0][0][-1][0]['B']-ip_sets[0][0][-1][0]['H']))
+
+    # print("P2 Over")
     del model
     return
 
