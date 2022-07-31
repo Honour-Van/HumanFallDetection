@@ -13,6 +13,8 @@ import cv2
 import time
 import receiver
 import algorithms
+import threading
+
 
 try:
     mp.set_start_method('spawn')
@@ -81,7 +83,7 @@ class FallDetector:
             args.pin_memory = True
 
         if args.checkpoint is None:
-            args.checkpoint = 'shufflenetv2k16w'
+            args.checkpoint = 'shufflenetv2k16-apollo-24'
 
         openpifpaf.decoder.configure(args)
         openpifpaf.network.Factory.configure(args)
@@ -99,30 +101,30 @@ class FallDetector:
         # 改成仅有一个摄像头
         if self.args.video is None:
             argss[0].video = 0
-        process1 = mp.Process(target=algorithms.extract_keypoints_parallel,
+        process1 = threading.Thread(target=algorithms.extract_keypoints_parallel,
                                 args=(queues[0], argss[0], counter1, counter2, self.consecutive_frames, e))
         process1.start()
         if self.args.coco_points:
             process1.join()
         else:
-            process2 = mp.Process(target=algorithms.alg2_sequential, args=(queues, argss,
+            process2 = threading.Thread(target=algorithms.alg2_sequential, args=(queues, argss,
                                                                 self.consecutive_frames, e))
             process2.start()
 
         recvr = receiver.Receiver(draw='amp', subcarrier=20)
-        process3 = mp.Process(target=recvr.serial_read)
-        process3.start()
-        process4 = mp.Process(target=recvr.draw)
-        process4.start()
+        # process3 = threading.Thread(target=recvr.serial_read)
+        # process3.start()
+        # process4 = threading.Thread(target=recvr.draw)
+        # process4.start()
         
-        process5 = mp.Process(target=self.window)
+        process5 = threading.Thread(target=self.window)
         process5.start()
 
         process1.join()
         if not self.args.coco_points:
             process2.join()
-        process3.join()
-        process4.join()
+        # process3.join()
+        # process4.join()
         process5.join()
 
         print('Exiting...')
@@ -131,14 +133,15 @@ class FallDetector:
     def window(self):
         cv2.namedWindow('preview')
         while True:
-            time.sleep(0.1)
             camera = algorithms.camera
+            print('camera visited')
             if camera is None:
                 continue
             # print(algorithms.state)
             # preview = np.concatenate((camera, receiver.image_csi))
             preview = camera
             cv2.imshow('preview', preview)
+            algorithms.camera_is_ready = False
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         cv2.destroyAllWindows()

@@ -15,13 +15,9 @@ from scipy.signal import savgol_filter, lfilter
 from model.model import LSTMModel
 import torch
 import math
+
 camera = None
 state = "loading"
-
-def get_camera():
-    return camera
-def get_state():
-    return state
 
 def get_source(args):
     tagged_df = None
@@ -282,6 +278,7 @@ def alg2_sequential(queues, argss, consecutive_frames, event):
                 global state
                 camera = img
                 state = activity_dict[prediction+5]
+                print('camera changed')
 
             elif argss[0].num_cams == 2:
                 num_matched, new_num, indxs_unmatched1 = match_ip(ip_sets[0], kp_frames[0], lstm_sets[0], num_matched, max_length_mat)
